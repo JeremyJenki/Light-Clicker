@@ -1,7 +1,8 @@
 #include <windows.h>
 
-1 ICON "icon.ico"
-2 ICON "icon-dark.ico"
+1 ICON "icon-app.ico"
+2 ICON "icon-light.ico"
+3 ICON "icon-dark.ico"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0

@@ -15,7 +15,7 @@
 #define SYNTH_MAGIC 0xC1C1C1C1UL
 
 static HHOOK         hMouseHook;
-static volatile LONG clicking = 0;
+static volatile int  clicking   = 0;
 static HWND          hwnd;
 static int           sleep_ms   = SLEEP_HIGH;
 static BOOL          is_light_theme = FALSE;
@@ -34,8 +34,8 @@ static BOOL detect_light_theme(void) {
     return value == 1;
 }
 
-#define IDI_LIGHT 1
-#define IDI_DARK  2
+#define IDI_LIGHT 2
+#define IDI_DARK  3
 
 static HICON get_tray_icon(void) {
     HINSTANCE hInst = GetModuleHandleA(NULL);
@@ -126,12 +126,12 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp) {
         int alt = GetAsyncKeyState(VK_LMENU) & 0x8000;
 
         if (alt && wp == WM_LBUTTONDOWN && !clicking) {
-            InterlockedExchange(&clicking, 1);
+            clicking = 1;
             HANDLE h = CreateThread(NULL, 0, click_thread, NULL, 0, NULL);
             if (h) CloseHandle(h);
             return 1;
         } else if (wp == WM_LBUTTONUP && clicking) {
-            InterlockedExchange(&clicking, 0);
+            clicking = 0;
             return 1;
         }
     }
@@ -151,7 +151,7 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_SPEED_HIGH:   sleep_ms = SLEEP_HIGH;   break;
         case IDM_SPEED_NORMAL: sleep_ms = SLEEP_NORMAL; break;
         case IDM_EXIT:
-            InterlockedExchange(&clicking, 0);
+            clicking = 0;
             remove_tray_icon();
             PostQuitMessage(0);
             break;
@@ -167,7 +167,7 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_DESTROY:
-        InterlockedExchange(&clicking, 0);
+        clicking = 0;
         remove_tray_icon();
         PostQuitMessage(0);
         break;
@@ -190,10 +190,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE prev, LPSTR cmd, int show) {
     wc.lpszClassName = "LightClickerWnd";
     RegisterClassA(&wc);
 
-    // FIX: Use a regular hidden window instead of HWND_MESSAGE.
-    // Message-only windows are excluded from broadcast messages like
-    // WM_SETTINGCHANGE, so the theme change handler was never firing.
-    // WS_POPUP with zero size keeps it invisible and off the taskbar.
     hwnd = CreateWindowA("LightClickerWnd", NULL, WS_POPUP,
                          0, 0, 0, 0, NULL, NULL, hInst, NULL);
 
