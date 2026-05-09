@@ -1,11 +1,14 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <mmsystem.h>
+#include <stdio.h>
 
 #define WM_TRAYICON      (WM_USER + 1)
 #define IDM_SPEED_MAX    1001
 #define IDM_SPEED_HIGH   1002
 #define IDM_SPEED_NORMAL 1003
+#define IDM_TOGGLE_MODE  1005
 #define IDM_EXIT         1004
 
 #define SLEEP_MAX    1
@@ -14,11 +17,15 @@
 
 #define SYNTH_MAGIC 0xC1C1C1C1UL
 
+// ---- Hotkey modifier -- change to VK_LMENU for Alt, VK_LSHIFT for Shift ----
+#define HOTKEY_VK VK_LCONTROL
+
 static HHOOK         hMouseHook;
-static volatile int  clicking   = 0;
+static volatile int  clicking     = 0;  /* which button is active: 0=none, 1=M1, 2=M2, 3=M3 */
 static HWND          hwnd;
-static int           sleep_ms   = SLEEP_HIGH;
+static int           sleep_ms     = SLEEP_HIGH;
 static BOOL          is_light_theme = FALSE;
+static BOOL          toggle_mode  = FALSE;
 
 // ---- Theme detection ----
 static BOOL detect_light_theme(void) {
@@ -39,14 +46,34 @@ static BOOL detect_light_theme(void) {
 
 static HICON get_tray_icon(void) {
     HINSTANCE hInst = GetModuleHandleA(NULL);
+    /* Use the app icon when a toggle is active to signal state */
+    int icon_id = (clicking && toggle_mode)
+                  ? 1
+                  : (is_light_theme ? IDI_LIGHT : IDI_DARK);
     HICON icon = (HICON)LoadImageA(hInst,
-        MAKEINTRESOURCEA(is_light_theme ? IDI_LIGHT : IDI_DARK),
+        MAKEINTRESOURCEA(icon_id),
         IMAGE_ICON, 64, 64, LR_DEFAULTCOLOR);
     if (!icon) icon = LoadIcon(NULL, IDI_APPLICATION);
     return icon;
 }
 
 // ---- Tray ----
+static void update_tray_tip(void) {
+    NOTIFYICONDATAA nid = {0};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd   = hwnd;
+    nid.uID    = 1;
+    nid.uFlags = NIF_TIP;
+    if (clicking && toggle_mode) {
+        const char *btn = (clicking == 1) ? "M1" : (clicking == 2) ? "M2" : "M3";
+        snprintf(nid.szTip, sizeof(nid.szTip) - 1,
+                  "Light Clicker [%s ACTIVE]", btn);
+    } else {
+        strncpy(nid.szTip, "Light Clicker", sizeof(nid.szTip) - 1);
+    }
+    Shell_NotifyIconA(NIM_MODIFY, &nid);
+}
+
 static void add_tray_icon(void) {
     NOTIFYICONDATAA nid = {0};
     nid.cbSize           = sizeof(nid);
@@ -67,6 +94,7 @@ static void update_tray_icon(void) {
     nid.uFlags = NIF_ICON;
     nid.hIcon  = get_tray_icon();
     Shell_NotifyIconA(NIM_MODIFY, &nid);
+    update_tray_tip();
 }
 
 static void remove_tray_icon(void) {
@@ -83,6 +111,8 @@ static void show_tray_menu(void) {
     AppendMenuA(menu, MF_STRING | (sleep_ms == SLEEP_HIGH   ? MF_CHECKED : 0), IDM_SPEED_HIGH,   "High");
     AppendMenuA(menu, MF_STRING | (sleep_ms == SLEEP_NORMAL ? MF_CHECKED : 0), IDM_SPEED_NORMAL, "Normal");
     AppendMenuA(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(menu, MF_STRING | (toggle_mode ? MF_CHECKED : 0), IDM_TOGGLE_MODE, "Toggle");
+    AppendMenuA(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(menu, MF_STRING, IDM_EXIT, "Exit");
 
     POINT pt;
@@ -93,26 +123,59 @@ static void show_tray_menu(void) {
     DestroyMenu(menu);
 }
 
-// ---- Clicker thread ----
+// ---- Click thread ----
+typedef struct { int button; } ThreadParam;
+
 static DWORD WINAPI click_thread(LPVOID param) {
-    (void)param;
+    int btn = ((ThreadParam *)param)->button;
+    HeapFree(GetProcessHeap(), 0, param);
+
     INPUT inp    = {0};
     INPUT inp_up = {0};
 
-    inp.type              = INPUT_MOUSE;
-    inp.mi.dwFlags        = MOUSEEVENTF_LEFTDOWN;
-    inp.mi.dwExtraInfo    = SYNTH_MAGIC;
+    inp.type           = INPUT_MOUSE;
+    inp.mi.dwExtraInfo = SYNTH_MAGIC;
 
     inp_up.type           = INPUT_MOUSE;
-    inp_up.mi.dwFlags     = MOUSEEVENTF_LEFTUP;
     inp_up.mi.dwExtraInfo = SYNTH_MAGIC;
 
-    while (clicking) {
+    switch (btn) {
+    case 1:
+        inp.mi.dwFlags    = MOUSEEVENTF_LEFTDOWN;
+        inp_up.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        break;
+    case 2:
+        inp.mi.dwFlags    = MOUSEEVENTF_RIGHTDOWN;
+        inp_up.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+        break;
+    case 3:
+        inp.mi.dwFlags    = MOUSEEVENTF_MIDDLEDOWN;
+        inp_up.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
+        break;
+    default:
+        return 0;
+    }
+
+    while (clicking == btn) {
         SendInput(1, &inp,    sizeof(INPUT));
         SendInput(1, &inp_up, sizeof(INPUT));
         Sleep(sleep_ms);
     }
     return 0;
+}
+
+static void start_clicking(int btn) {
+    ThreadParam *p = (ThreadParam *)HeapAlloc(GetProcessHeap(), 0, sizeof(ThreadParam));
+    if (!p) return;
+    p->button = btn;
+    clicking = btn;
+    HANDLE h = CreateThread(NULL, 0, click_thread, p, 0, NULL);
+    if (h) CloseHandle(h);
+    else { clicking = 0; HeapFree(GetProcessHeap(), 0, p); }
+}
+
+static void stop_clicking(void) {
+    clicking = 0;
 }
 
 // ---- Mouse hook ----
@@ -123,16 +186,49 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp) {
         if (ms->dwExtraInfo == SYNTH_MAGIC)
             return CallNextHookEx(hMouseHook, nCode, wp, lp);
 
-        int alt = GetAsyncKeyState(VK_LMENU) & 0x8000;
+        int hotkey = GetAsyncKeyState(HOTKEY_VK) & 0x8000;
 
-        if (alt && wp == WM_LBUTTONDOWN && !clicking) {
-            clicking = 1;
-            HANDLE h = CreateThread(NULL, 0, click_thread, NULL, 0, NULL);
-            if (h) CloseHandle(h);
-            return 1;
-        } else if (wp == WM_LBUTTONUP && clicking) {
-            clicking = 0;
-            return 1;
+        /* Determine which button and whether it's a down or up event */
+        int  btn_down = 0, btn_up = 0;
+        if      (wp == WM_LBUTTONDOWN) btn_down = 1;
+        else if (wp == WM_RBUTTONDOWN) btn_down = 2;
+        else if (wp == WM_MBUTTONDOWN) btn_down = 3;
+        else if (wp == WM_LBUTTONUP)   btn_up   = 1;
+        else if (wp == WM_RBUTTONUP)   btn_up   = 2;
+        else if (wp == WM_MBUTTONUP)   btn_up   = 3;
+
+        if (toggle_mode) {
+            /* Toggle mode: hotkey+down either starts or stops */
+            if (hotkey && btn_down) {
+                if (!clicking) {
+                    /* Start toggled clicking */
+                    start_clicking(btn_down);
+                    update_tray_icon();
+                    PlaySoundA("SystemAsterisk", NULL,
+                               SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+                } else {
+                    /* Any hotkey+down while active stops it */
+                    stop_clicking();
+                    update_tray_icon();
+                    PlaySoundA("SystemHand", NULL,
+                               SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+                }
+                return 1;
+            }
+            /* In toggle mode, suppress the matching up event while active
+               so the held combination doesn't fire a real click */
+            if (btn_up && clicking == btn_up)
+                return 1;
+        } else {
+            /* Hold mode: hotkey+down starts, any up of the active button stops */
+            if (hotkey && btn_down && !clicking) {
+                start_clicking(btn_down);
+                return 1;
+            }
+            if (btn_up && clicking == btn_up) {
+                stop_clicking();
+                return 1;
+            }
         }
     }
     return CallNextHookEx(hMouseHook, nCode, wp, lp);
@@ -150,8 +246,16 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_SPEED_MAX:    sleep_ms = SLEEP_MAX;    break;
         case IDM_SPEED_HIGH:   sleep_ms = SLEEP_HIGH;   break;
         case IDM_SPEED_NORMAL: sleep_ms = SLEEP_NORMAL; break;
+        case IDM_TOGGLE_MODE:
+            /* If turning off toggle while active, stop cleanly */
+            if (toggle_mode && clicking) {
+                stop_clicking();
+                update_tray_icon();
+            }
+            toggle_mode = !toggle_mode;
+            break;
         case IDM_EXIT:
-            clicking = 0;
+            stop_clicking();
             remove_tray_icon();
             PostQuitMessage(0);
             break;
@@ -167,7 +271,7 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_DESTROY:
-        clicking = 0;
+        stop_clicking();
         remove_tray_icon();
         PostQuitMessage(0);
         break;
