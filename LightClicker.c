@@ -2,7 +2,6 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <mmsystem.h>
-#include <stdio.h>
 
 #define WM_TRAYICON      (WM_USER + 1)
 #define IDM_SPEED_MAX    1001
@@ -46,34 +45,14 @@ static BOOL detect_light_theme(void) {
 
 static HICON get_tray_icon(void) {
     HINSTANCE hInst = GetModuleHandleA(NULL);
-    /* Use the app icon when a toggle is active to signal state */
-    int icon_id = (clicking && toggle_mode)
-                  ? 1
-                  : (is_light_theme ? IDI_LIGHT : IDI_DARK);
     HICON icon = (HICON)LoadImageA(hInst,
-        MAKEINTRESOURCEA(icon_id),
+        MAKEINTRESOURCEA(is_light_theme ? IDI_LIGHT : IDI_DARK),
         IMAGE_ICON, 64, 64, LR_DEFAULTCOLOR);
     if (!icon) icon = LoadIcon(NULL, IDI_APPLICATION);
     return icon;
 }
 
 // ---- Tray ----
-static void update_tray_tip(void) {
-    NOTIFYICONDATAA nid = {0};
-    nid.cbSize = sizeof(nid);
-    nid.hWnd   = hwnd;
-    nid.uID    = 1;
-    nid.uFlags = NIF_TIP;
-    if (clicking && toggle_mode) {
-        const char *btn = (clicking == 1) ? "M1" : (clicking == 2) ? "M2" : "M3";
-        snprintf(nid.szTip, sizeof(nid.szTip) - 1,
-                  "Light Clicker [%s ACTIVE]", btn);
-    } else {
-        strncpy(nid.szTip, "Light Clicker", sizeof(nid.szTip) - 1);
-    }
-    Shell_NotifyIconA(NIM_MODIFY, &nid);
-}
-
 static void add_tray_icon(void) {
     NOTIFYICONDATAA nid = {0};
     nid.cbSize           = sizeof(nid);
@@ -94,7 +73,6 @@ static void update_tray_icon(void) {
     nid.uFlags = NIF_ICON;
     nid.hIcon  = get_tray_icon();
     Shell_NotifyIconA(NIM_MODIFY, &nid);
-    update_tray_tip();
 }
 
 static void remove_tray_icon(void) {
@@ -201,22 +179,17 @@ static LRESULT CALLBACK MouseProc(int nCode, WPARAM wp, LPARAM lp) {
             /* Toggle mode: hotkey+down either starts or stops */
             if (hotkey && btn_down) {
                 if (!clicking) {
-                    /* Start toggled clicking */
                     start_clicking(btn_down);
-                    update_tray_icon();
                     PlaySoundA("SystemAsterisk", NULL,
                                SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
                 } else {
-                    /* Any hotkey+down while active stops it */
                     stop_clicking();
-                    update_tray_icon();
                     PlaySoundA("SystemHand", NULL,
                                SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
                 }
                 return 1;
             }
-            /* In toggle mode, suppress the matching up event while active
-               so the held combination doesn't fire a real click */
+            /* Suppress the matching up event while active */
             if (btn_up && clicking == btn_up)
                 return 1;
         } else {
@@ -247,11 +220,8 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_SPEED_HIGH:   sleep_ms = SLEEP_HIGH;   break;
         case IDM_SPEED_NORMAL: sleep_ms = SLEEP_NORMAL; break;
         case IDM_TOGGLE_MODE:
-            /* If turning off toggle while active, stop cleanly */
-            if (toggle_mode && clicking) {
+            if (toggle_mode && clicking)
                 stop_clicking();
-                update_tray_icon();
-            }
             toggle_mode = !toggle_mode;
             break;
         case IDM_EXIT:
